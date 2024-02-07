@@ -1,0 +1,15 @@
+{
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/bases",
+    "${workspaceFolder}/components"
+  ],
+  "terminal.integrated.env.osx": {
+    "PYTHONPATH": "${workspaceFolder}/components:${workspaceFolder}/bases"
+  },
+  "python.envFile": "${workspaceFolder}/.env",
+  "python.autoComplete.extraPaths": [
+    "${workspaceFolder}/bases",
+    "${workspaceFolder}/components"
+  ],
+  "jupyter.notebookFileRoot": "${workspaceFolder}/components"
+}

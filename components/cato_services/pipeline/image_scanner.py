@@ -1,11 +1,7 @@
-"""Provides Aqua API functions for the ``tornado_shared_resources`` package."""
+"""Provides Image Scanner Abstraction"""
 
-import urllib.parse
-from datetime import datetime, timedelta
 from abc import ABC, abstractmethod
 from typing import TypedDict, List
-
-from catoservices.util import utils
 
 class Image(TypedDict):
     name: str

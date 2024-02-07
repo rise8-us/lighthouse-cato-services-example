@@ -1,8 +1,4 @@
-import urllib
-import json
-from datetime import datetime
 from .image_scanner import Image, ImageScanner, Vulnerability, Suppression
-from cato_services.util import utils
 from typing import List
 
 def filter_suppressions_by_image(image, suppressions):
