@@ -1,0 +1,253 @@
+name: SecRel Reusable Workflow
+on:
+  workflow_call:
+    inputs:
+      config-file:
+        required: false
+        type: string
+      images:
+        required: false
+        type: string
+      requires-prod-signing-keys:
+        required: false
+        type: boolean
+        default: true
+env:
+  SECREL_VERSION: "v5.0.12"
+  BUILD_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+  BUILD_NUMBER: ${{ github.run_id }}/attempts/${{ github.run_attempt }}
+  BUILD_JOB_NAME: ${{ github.run_number }}
+  SDE_URL: https://sde.lighthouse.va.gov
+jobs:
+  prerequisites:
+    name: SecRel Pipeline Prerequisites
+    runs-on: sr-self-hosted
+    env:
+      SECREL_FGAT: ${{ secrets.SECREL_FGAT }}
+      SECREL_CONFIG: ${{ inputs.config-file }}
+      IMAGES: ${{ inputs.images }}
+    outputs:
+      exit-code: ${{ steps.validation.outputs.exit-code }}
+      crm-json: ${{ steps.crm.outputs.crm-json }}
+      images-json: ${{ steps.parse-images.outputs.images-json }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: department-of-veterans-affairs/lighthouse-tornado-secrel-pipeline
+          ref: ${{ env.SECREL_VERSION }}
+          token: ${{ secrets.SECREL_FGAT }}
+          path: secrel
+      - name: Install Tornado Shared Resources Python Lib
+        uses: department-of-veterans-affairs/lighthouse-tornado-shared-resources/.github/actions/install-python-lib@v1.8.2
+        with:
+          token: ${{ secrets.SECREL_FGAT }}
+          version: v1.8.2
+      - name: Get CRM data
+        id: crm
+        env:
+          CA_CERTS: "/etc/ssl/certs/ca-certificates.crt"
+          CRM_API_URL: https://ldx-mapi.lighthouse.va.gov/lighthouse-cato
+          CLIENT_ID: ${{ secrets.SECREL_CRM_API_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.SECREL_CRM_API_CLIENT_SECRET }}
+          REPO: ${{ github.event.repository.name }}
+        run: python3 secrel/.github/scripts/crm_data.py
+      - name: Print CRM data
+        env:
+          CRM_JSON: ${{ steps.crm.outputs.crm-json }}
+        run: echo "CRM JSON:" && echo $CRM_JSON | jq .
+      - name: Check authorization
+        uses: ./secrel/.github/actions/authorization
+        with:
+          crm-json: ${{ steps.crm.outputs.crm-json }}
+      - uses: actions/setup-python@v4
+        with:
+          python-version: 3.11
+      - name: Validate inputs
+        id: validation
+        run: |
+          pip install pyyaml
+          set +e
+          python3 secrel/.github/scripts/validation.py
+          EXIT_CODE=$?
+          set -e
+          echo exit-code=$EXIT_CODE >> $GITHUB_OUTPUT
+          exit $EXIT_CODE
+      - name: Install skopeo
+        run: sudo apt-get -y update && sudo apt-get -y install skopeo
+      - name: Parse Images
+        id: parse-images
+        uses: ./secrel/.github/actions/parse-images
+        with:
+          images: ${{ inputs.images }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+  snyk:
+    name: Snyk Scan
+    needs: prerequisites
+    uses: ./.github/workflows/snyk.yml
+    with:
+      config-file: ${{ inputs.config-file }}
+      telemetry: false
+    secrets: inherit
+  aqua:
+    name: Aqua Scan
+    if: ${{ inputs.images != '' }}
+    needs: prerequisites
+    uses: ./.github/workflows/aqua.yml
+    with:
+      images: ${{ inputs.images }}
+      telemetry: false
+    secrets: inherit
+  sde-gate-check:
+    name: SDE Gate Check
+    needs: prerequisites
+    runs-on: sr-self-hosted
+    outputs:
+      exit-code: ${{ steps.sde.outputs.code }}
+    env:
+      SDE_TOKEN: ${{ secrets.SDE_TOKEN }}
+      SECREL_FGAT: ${{ secrets.SECREL_FGAT }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: department-of-veterans-affairs/lighthouse-tornado-secrel-pipeline
+          ref: ${{ env.SECREL_VERSION }}
+          token: ${{ secrets.SECREL_FGAT }}
+          path: secrel
+      - name: Get SDE application id
+        id: get-id
+        env:
+          CRM_JSON: ${{ needs.prerequisites.outputs.crm-json }}
+        run: |
+          echo "CRM JSON:" && echo $CRM_JSON | jq .
+          SDE_APP_ID=$(echo $CRM_JSON | jq -r '.system.sde_application_id')
+          echo "SDE appID: $SDE_APP_ID"
+          echo "sde-app-id=$SDE_APP_ID" >> $GITHUB_OUTPUT
+      - name: Install Tornado Shared Resources Python Lib
+        uses: department-of-veterans-affairs/lighthouse-tornado-shared-resources/.github/actions/install-python-lib@v1.8.2
+        with:
+          token: ${{ secrets.SECREL_FGAT }}
+          version: v1.8.2
+      - name: Check SDE Compliance
+        id: sde
+        env:
+          APP_ID: ${{ steps.get-id.outputs.sde-app-id }}
+          CA_CERTS: "/etc/ssl/certs/ca-certificates.crt"
+          CRM_DATA: ${{ needs.prerequisites.outputs.crm-json }}
+        working-directory: secrel
+        run: |
+          set +e
+          python3 ./.github/scripts/sde.py $APP_ID
+          CODE=$?
+          set -e
+          echo "status code: $CODE"
+          echo "code=$CODE" >> $GITHUB_OUTPUT
+          exit $CODE
+  sign-images-for-sandbox:
+    name: Sign Images for Sandbox
+    needs:
+      - prerequisites
+      - aqua
+      - snyk
+      - sde-gate-check
+    if: inputs.images != ''
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.prerequisites.outputs.images-json) }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: department-of-veterans-affairs/lighthouse-tornado-secrel-pipeline
+          ref: ${{ env.SECREL_VERSION }}
+          token: ${{ secrets.SECREL_FGAT }}
+          path: secrel
+      - name: Call Image Signing
+        uses: ./secrel/.github/actions/call-image-signing
+        with:
+          image: ${{ matrix.name }}
+          repo: ${{ github.repository }}
+          fgat: ${{ secrets.SECREL_FGAT }}
+          pat: ${{ secrets.SECREL_PAT }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          requires-prod-signing-keys: false
+          secrel-version: ${{ env.SECREL_VERSION }}
+      - name: Output warning message
+        if: inputs.requires-prod-signing-keys == false
+        env:
+          IMAGE: ${{ matrix.name }}
+        run: echo "::notice::$IMAGE was not signed and approved for production because `requires-prod-signing-keys` input to the SecRel workflow was set to false. If you need to deploy your image into production, you must set this workflow input to true, and address any gate check failures as they surface."
+  sign-images-for-prod:
+    name: Sign Images for Production
+    needs:
+      - prerequisites
+      - aqua
+      - snyk
+      - sde-gate-check
+      - sign-images-for-sandbox
+    if: inputs.images != '' && inputs.requires-prod-signing-keys == true
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.prerequisites.outputs.images-json) }}
+      fail-fast: false
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: department-of-veterans-affairs/lighthouse-tornado-secrel-pipeline
+          ref: ${{ env.SECREL_VERSION }}
+          token: ${{ secrets.SECREL_FGAT }}
+          path: secrel
+      - name: Call Image Signing
+        uses: ./secrel/.github/actions/call-image-signing
+        with:
+          image: ${{ matrix.name }}
+          repo: ${{ github.repository }}
+          fgat: ${{ secrets.SECREL_FGAT }}
+          pat: ${{ secrets.SECREL_PAT }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          requires-prod-signing-keys: true
+          secrel-version: ${{ env.SECREL_VERSION}}
+  repo-dispatch-telemetry:
+    name: SecRel Telemetry
+    needs:
+      - prerequisites
+      - snyk
+      - aqua
+      - sde-gate-check
+      - sign-images-for-sandbox
+      - sign-images-for-prod
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Telemetry Repo Dispatch
+        env:
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+          SECREL_FGAT: ${{ secrets.SECREL_FGAT }}
+        run: |
+          status=success
+
+          echo "Snyk code: ${{ needs.snyk.outputs.exit-code }}"
+          echo "Aqua code: ${{ needs.aqua.outputs.exit-code }}"
+          echo "SDE code: ${{ needs.sde-gate-check.outputs.exit-code }}"
+
+          FAILURE_CHECK=$(jq -r 'del(."aqua", ."snyk", ."sde-gate-check", ."secrel-validation") | any(.[].result; . == "failure")' << EOF
+          ${{ toJSON(needs) }}
+          EOF
+          )
+
+          if [[ $FAILURE_CHECK == "true" || "${{ needs.snyk.outputs.exit-code }}" == "1" ||  "${{ needs.aqua.outputs.exit-code }}" == "1" || "${{ needs.sde-gate-check.outputs.exit-code }}" == "1" || "${{ needs.prerequisites.outputs.exit-code }}" == "1" ]]; then
+            status=failure
+          fi
+
+          echo $status
+          curl -H "Authorization: token $SECREL_FGAT" \
+            -H 'Accept: application/vnd.github.everest-preview+json' \
+            --request POST \
+            "https://api.github.com/repos/department-of-veterans-affairs/lighthouse-tornado-automations/actions/workflows/secrel-telemetry.yml/dispatches" \
+            -d '{ "ref": "main", "inputs": {"metric": "secrel.runs", "workflow": "Pipeline", "status": "'$status'", "repo": "'$REPO'", "pipeline-version": "'$SECREL_VERSION'", "run-id": "'$RUN_ID'"}}'

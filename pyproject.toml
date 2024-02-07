@@ -1,0 +1,14 @@
+[tool.poetry]
+name = "lighthouse-cato-services-example"
+version = "0.1.0"
+description = "A sample of how SecRel might be restructured into a true combined toolchain."
+authors = ["Schuyler Reinken <Schuyler.Reinken@va.gov>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
