@@ -1,5 +1,5 @@
 [tool.polylith]
-namespace = "cato-services"
+namespace = "cato_services"
 git_tag_pattern = "stable-*"
 
 [tool.polylith.structure]
